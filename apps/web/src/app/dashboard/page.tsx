@@ -1,0 +1,622 @@
+'use client';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import Link from 'next/link';
+import Image from 'next/image';
+import dynamic from 'next/dynamic';
+import AppShell from '@/components/AppShell';
+import OnboardingGuide from '@/components/OnboardingGuide';
+import { useAuth } from '@/components/AuthContext';
+import { useLoginHref } from '@/components/AuthGate';
+import { useMode } from '@/components/ModeContext';
+import { apiRequest } from '@/lib/api';
+import { CURRICULUM, getAllLessons } from '@/lib/curriculum';
+
+// Mini SVG sparkline component
+function Sparkline({ data, width = 280, height = 60, color = 'var(--green)' }: { data: number[]; width?: number; height?: number; color?: string }) {
+  if (data.length < 2) return null;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const points = data.map((v, i) => {
+    const x = (i / (data.length - 1)) * width;
+    const y = height - ((v - min) / range) * (height - 4) - 2;
+    return `${x},${y}`;
+  }).join(' ');
+  const fillPoints = `0,${height} ${points} ${width},${height}`;
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ display: 'block' }}>
+      <defs>
+        <linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.15" />
+          <stop offset="100%" stopColor={color} stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+      <polygon points={fillPoints} fill="url(#sparkFill)" />
+      <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+const ShareCard = dynamic(() => import('@/components/ShareCard'), { ssr: false });
+
+interface TrendingToken {
+  address: string;
+  symbol: string;
+  name: string;
+  priceUsd: number;
+  priceSol: number;
+  priceChange24h: number;
+  volume24h: number;
+  liquidity: number;
+  marketCap: number;
+  image: string | null;
+}
+
+function fmtMcap(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  if (n > 0) return `${n.toFixed(0)}`;
+  return '-';
+}
+
+function fmtVol(n: number): string {
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
+  return n > 0 ? `$${n.toFixed(0)}` : '-';
+}
+
+function countPositionTrades(trades: any[], positions: any[] = []) {
+  const ids = new Set<string>();
+  trades.forEach((t: any) => {
+    if (t.position_id) ids.add(String(t.position_id));
+  });
+  positions.forEach((p: any) => {
+    if (p.id) ids.add(String(p.id));
+  });
+  return ids.size;
+}
+
+export default function DashboardPage() {
+  const { mode } = useMode();
+  const { user, token: authToken, serverBalance, serverPositions } = useAuth();
+  const loginHref = useLoginHref();
+  const [balance, setBalance] = useState<number | null>(null);
+  const [positions, setPositions] = useState<any[]>([]);
+  const [trades, setTrades] = useState<any[]>([]);
+  const [trendingTokens, setTrendingTokens] = useState<TrendingToken[]>([]);
+  const [showFlex, setShowFlex] = useState(false);
+  const [completedLessons, setCompletedLessons] = useState<Set<string>>(new Set());
+  const [dataLoading, setDataLoading] = useState(true);
+  const [dataError, setDataError] = useState(false);
+
+  // Fetch user data
+  const fetchUserData = useCallback(() => {
+    if (!authToken) { setDataLoading(false); return; }
+    setDataLoading(true);
+    setDataError(false);
+    Promise.all([
+      apiRequest('GET', '/auth/me', undefined, authToken).then(r => {
+         if (r.success && r.data?.user) {
+          setBalance(parseFloat(r.data.user.paper_balance ?? 0));
+        }
+      }),
+      apiRequest('GET', '/trades/positions?status=open', undefined, authToken).then(r => {
+        if (r.success && r.data?.positions) {
+          setPositions(r.data.positions);
+        }
+      }),
+      apiRequest('GET', '/trades/history', undefined, authToken).then(r => {
+        if (r.success && r.data?.trades) {
+          setTrades(r.data.trades);
+        }
+      }),
+    ]).catch((err) => {
+      console.error('[Dashboard] Data load error:', err);
+      setDataError(true);
+    }).finally(() => {
+      setDataLoading(false);
+    });
+  }, [authToken]);
+
+  useEffect(() => {
+    fetchUserData();
+  }, [fetchUserData]);
+
+  // Fetch trending tokens from API (real data)
+  const [trendingError, setTrendingError] = useState(false);
+  useEffect(() => {
+    apiRequest('GET', '/tokens/trending').then(r => {
+      if (r.success && r.data?.tokens) {
+        setTrendingTokens(r.data.tokens.slice(0, 8));
+        setTrendingError(false);
+      } else {
+        setTrendingError(true);
+      }
+    }).catch(() => setTrendingError(true));
+  }, []);
+
+  // Fetch academy progress
+  useEffect(() => {
+    if (!authToken) return;
+    apiRequest('GET', '/academy/progress', undefined, authToken).then(r => {
+      if (r.success && r.data?.completed_lessons) {
+        setCompletedLessons(new Set(r.data.completed_lessons));
+      }
+    }).catch(() => {
+      const s = localStorage.getItem('pa-academy');
+      if (s) try { setCompletedLessons(new Set(JSON.parse(s))); } catch {}
+    });
+  }, [authToken]);
+
+  const displayBalance = balance ?? serverBalance ?? 0;
+
+  // Use serverPositions from Firestore as fallback if REST API returned nothing
+  const effectivePositions = positions.length > 0 ? positions : serverPositions;
+  const totalTradeCount = countPositionTrades(trades, effectivePositions);
+  const positionValue = effectivePositions.reduce((s: number, p: any) => s + parseFloat(String(p.current_value ?? p.amount_sol ?? 0)), 0);
+  const totalPortfolioValue = displayBalance + positionValue;
+
+  // Only sell/sell_init trades have meaningful PnL
+  const sellTrades = trades.filter((t: any) => t.trade_type === 'sell' || t.trade_type === 'sell_init');
+
+  // Total PnL: sum realized PnL from sell trades + unrealized from open positions
+  const realizedPnl = sellTrades.reduce((s: number, t: any) => s + parseFloat(String(t.realized_pnl_sol ?? 0)), 0);
+  const unrealizedPnl = effectivePositions.reduce((s: number, p: any) => {
+    const currentValue = parseFloat(String(p.current_value ?? 0));
+    const invested = parseFloat(String(p.amount_sol ?? 0));
+    return s + (currentValue - invested);
+  }, 0);
+  const totalPnl = realizedPnl + unrealizedPnl;
+
+  // Win rate: only from sell trades
+  const winRate = sellTrades.length > 0 ? Math.round((sellTrades.filter((t: any) => parseFloat(String(t.realized_pnl_sol ?? 0)) > 0).length / sellTrades.length) * 100) : 0;
+  const isAuthed = !!authToken;
+  const displayName = user?.displayName || user?.email?.split('@')[0] || 'explorer';
+
+  // Calculate trading streak from SELL trades only (buys don't have PnL)
+  const streak = useMemo(() => {
+    if (sellTrades.length === 0) return 0;
+    let count = 0;
+    const sorted = [...sellTrades].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    for (const t of sorted) {
+      const pnl = parseFloat(String(t.realized_pnl_sol ?? 0));
+      if (count === 0) {
+        count = pnl > 0 ? 1 : -1;
+      } else if ((count > 0 && pnl > 0) || (count < 0 && pnl <= 0)) {
+        count += count > 0 ? 1 : -1;
+      } else break;
+    }
+    return count;
+  }, [sellTrades]);
+
+  // Build equity curve: track balance changes from all trades
+  const equityCurve = useMemo(() => {
+    const curve = [100]; // starting balance
+    const sorted = [...trades].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    let running = 100;
+    for (const t of sorted) {
+      if (t.trade_type === 'buy') {
+        running -= parseFloat(String(t.amount_sol ?? 0));
+      } else {
+        running += parseFloat(String(t.amount_sol ?? 0));
+      }
+      curve.push(Math.max(0, running));
+    }
+    if (curve.length === 1) curve.push(displayBalance);
+    return curve;
+  }, [trades, displayBalance]);
+
+  // Best/worst trade: only from sell trades
+  const bestTrade = sellTrades.length > 0 ? Math.max(...sellTrades.map((t: any) => parseFloat(String(t.realized_pnl_sol ?? 0)))) : 0;
+  const worstTrade = sellTrades.length > 0 ? Math.min(...sellTrades.map((t: any) => parseFloat(String(t.realized_pnl_sol ?? 0)))) : 0;
+
+  // Avg hold time: calculate from buy→sell pairs
+  const avgHoldTime = useMemo(() => {
+    if (sellTrades.length === 0) return '-';
+    const buyTrades = trades.filter((t: any) => t.trade_type === 'buy');
+    const holdTimes: number[] = [];
+    for (const sell of sellTrades) {
+      const matchingBuy = buyTrades.find((b: any) => b.position_id === sell.position_id);
+      if (matchingBuy) {
+        const buyTime = new Date(matchingBuy.created_at).getTime();
+        const sellTime = new Date(sell.created_at).getTime();
+        const diffMs = sellTime - buyTime;
+        if (diffMs > 0) holdTimes.push(diffMs);
+      }
+    }
+    if (holdTimes.length === 0) return 'N/A';
+    const avgMs = holdTimes.reduce((s, t) => s + t, 0) / holdTimes.length;
+    const avgMin = avgMs / 60000;
+    if (avgMin < 60) return `${Math.round(avgMin)}m`;
+    const avgHr = avgMin / 60;
+    if (avgHr < 24) return `${avgHr.toFixed(1)}h`;
+    return `${(avgHr / 24).toFixed(1)}d`;
+  }, [sellTrades, trades]);
+
+  const allLessons = getAllLessons();
+  const academyPct = allLessons.length > 0 ? Math.round((completedLessons.size / allLessons.length) * 100) : 0;
+  const nextLesson = allLessons.find(l => !completedLessons.has(l.id));
+
+  return (
+    <AppShell balance={totalPortfolioValue}>
+      {isAuthed && <OnboardingGuide />}
+      {showFlex && (
+        <ShareCard
+          tokenSymbol="PORTFOLIO"
+          pnlPercent={displayBalance > 100 ? ((displayBalance - 100) / 100) * 100 : ((displayBalance - 100) / 100) * 100}
+          pnlSol={totalPnl}
+          entryPrice={100}
+          investedSol={100}
+          isOpen={true}
+          onClose={() => setShowFlex(false)}
+        />
+      )}
+
+      {/* Greeting */}
+      <div style={{ marginBottom: 20 }} className="an">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <h1 style={{ fontSize: 26, fontWeight: 800, color: 'var(--t0)', letterSpacing: -0.5 }}>
+              {isAuthed ? 'Welcome back' : 'Welcome'}, <span style={{ color: 'var(--green)' }}>{displayName}</span>
+            </h1>
+            <p style={{ fontSize: 13, color: 'var(--t3)', marginTop: 4 }}>
+              {!isAuthed
+                ? 'Browse public markets and lessons. Sign in when you are ready to save simulated trades.'
+                : mode === 'beginner'
+                  ? 'Your paper trading dashboard. No real money -- learn to trade risk-free.'
+                  : `Portfolio overview. ${effectivePositions.length} open positions.`}
+            </p>
+          </div>
+          <button className="btn haptic" style={{ background: 'linear-gradient(135deg, rgba(0,255,136,0.08), rgba(59,130,246,0.08))', border: '1px solid rgba(0,255,136,0.1)', color: 'var(--green)', fontWeight: 700, fontSize: 12 }}
+            onClick={() => isAuthed ? setShowFlex(true) : window.location.href = loginHref}>
+            {isAuthed ? 'Share / Flex' : 'Sign in'}
+          </button>
+        </div>
+      </div>
+
+      {!isAuthed && (
+        <div className="card an an1" style={{ marginBottom: 14, padding: 16, borderStyle: 'dashed', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--t0)', marginBottom: 3 }}>Public preview</div>
+            <div style={{ fontSize: 12, color: 'var(--t2)' }}>The dashboard is showing sample-empty account stats. Saved balances, positions, history, and analytics unlock after sign-in.</div>
+          </div>
+          <Link href={loginHref} className="btn primary haptic" style={{ padding: '8px 16px', fontSize: 12, fontWeight: 700, flexShrink: 0 }}>Sign in to trade</Link>
+        </div>
+      )}
+
+      {/* Stats Strip */}
+      <div className="stats-row an an1">
+        <div className="stat-card" style={{ borderColor: 'rgba(0,255,136,0.08)' }}>
+          <div className="stat-label">Portfolio Value</div>
+          <div className="stat-val mono">{dataLoading && balance === null ? <span className="skeleton" style={{ display: 'inline-block', width: 80, height: 20, borderRadius: 4 }} /> : <>{totalPortfolioValue.toFixed(mode === 'pro' ? 4 : 2)} <span style={{ fontSize: 12, color: 'var(--t3)' }}>SOL</span></>}</div>
+          <div className="stat-sub">{isAuthed ? `Cash: ${displayBalance.toFixed(2)} SOL` : 'Sample balance'}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Total PnL</div>
+          <div className={`stat-val mono ${totalPnl >= 0 ? 'up' : 'down'}`}>
+            {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(4)}
+          </div>
+          <div className="stat-sub">{totalPnl >= 0 ? 'Profit' : 'Loss'}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Position Trades</div>
+          <div className="stat-val mono">{totalTradeCount}</div>
+          <div className="stat-sub">Add-ons grouped</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Win Rate</div>
+          <div className="stat-val mono">{winRate}<span style={{ fontSize: 14, color: 'var(--t3)' }}>%</span></div>
+          <div className="stat-bar"><div className="stat-bar-fill" style={{ width: `${winRate}%`, background: winRate > 50 ? 'var(--green)' : 'var(--red)' }} /></div>
+        </div>
+      </div>
+
+      {/* Equity Chart + Streak */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }} className="an an1">
+        <div className="card" style={{ overflow: 'hidden' }}>
+          <div className="card-head">
+            <span className="card-title">Portfolio Equity</span>
+            <span className={`mono ${totalPortfolioValue >= 100 ? 'up' : 'down'}`} style={{ fontSize: 12, fontWeight: 700 }}>
+              {totalPortfolioValue >= 100 ? '+' : ''}{((totalPortfolioValue - 100) / 100 * 100).toFixed(1)}%
+            </span>
+          </div>
+          <div style={{ padding: '8px 14px 14px' }}>
+            <Sparkline data={equityCurve} width={500} height={70} color={totalPortfolioValue >= 100 ? 'var(--green)' : 'var(--red)'} />
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 9, color: 'var(--t3)' }}>
+              <span>Start: 100 SOL</span>
+              <span className="mono" style={{ fontWeight: 600, color: totalPortfolioValue >= 100 ? 'var(--green)' : 'var(--red)' }}>Now: {totalPortfolioValue.toFixed(2)} SOL</span>
+            </div>
+          </div>
+        </div>
+        <div className="card">
+          <div className="card-head">
+            <span className="card-title">Trading Stats</span>
+          </div>
+          <div className="card-pad">
+            {/* Streak */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+              <div style={{ fontSize: 28, fontWeight: 800, color: streak > 0 ? 'var(--green)' : streak < 0 ? 'var(--red)' : 'var(--t3)' }}>
+                {Math.abs(streak)}
+              </div>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: streak > 0 ? 'var(--green)' : streak < 0 ? 'var(--red)' : 'var(--t3)' }}>
+                  {streak > 0 ? 'Win Streak' : streak < 0 ? 'Loss Streak' : 'No streak'}
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--t3)' }}>Consecutive {streak > 0 ? 'wins' : streak < 0 ? 'losses' : '-'}</div>
+              </div>
+            </div>
+            {/* Mini stats grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <div style={{ padding: '8px 10px', background: 'var(--bg-2)', borderRadius: 6 }}>
+                <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5 }}>Best Trade</div>
+                <div className="mono up" style={{ fontSize: 13, fontWeight: 700 }}>{bestTrade > 0 ? '+' : ''}{bestTrade.toFixed(4)}</div>
+              </div>
+              <div style={{ padding: '8px 10px', background: 'var(--bg-2)', borderRadius: 6 }}>
+                <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5 }}>Worst Trade</div>
+                <div className="mono down" style={{ fontSize: 13, fontWeight: 700 }}>{worstTrade.toFixed(4)}</div>
+              </div>
+              <div style={{ padding: '8px 10px', background: 'var(--bg-2)', borderRadius: 6 }}>
+                <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5 }}>Open Positions</div>
+                <div className="mono" style={{ fontSize: 13, fontWeight: 700, color: 'var(--t0)' }}>{effectivePositions.length}</div>
+              </div>
+              <div style={{ padding: '8px 10px', background: 'var(--bg-2)', borderRadius: 6 }}>
+                <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5 }}>Avg Hold</div>
+                <div className="mono" style={{ fontSize: 13, fontWeight: 700, color: 'var(--t0)' }}>{avgHoldTime}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Portfolio Allocation Bar */}
+      {effectivePositions.length > 0 && (
+        <div className="card an an1" style={{ marginBottom: 14 }}>
+          <div className="card-head">
+            <span className="card-title">Portfolio Allocation</span>
+          </div>
+          <div className="card-pad">
+            {(() => {
+              const ALLOC_COLORS = ['#4ade80', '#22d3ee', '#facc15', '#f87171', '#c084fc', '#fb923c', '#60a5fa'];
+              const posAllocations = effectivePositions.map((p: any, i: number) => ({
+                label: p.token_symbol || p.symbol || 'TK',
+                value: parseFloat(p.amount_sol ?? p.amount ?? 0),
+                color: ALLOC_COLORS[i % ALLOC_COLORS.length],
+              }));
+              const cashVal = displayBalance - posAllocations.reduce((s: number, a: any) => s + a.value, 0);
+              const all = [{ label: 'Cash', value: Math.max(0, cashVal), color: 'var(--t3)' }, ...posAllocations];
+              const total = all.reduce((s, a) => s + a.value, 0) || 1;
+              return (
+                <>
+                  <div style={{ height: 20, display: 'flex', borderRadius: 10, overflow: 'hidden', gap: 1.5, marginBottom: 10 }}>
+                    {all.filter(a => a.value > 0).map(a => (
+                      <div key={a.label} style={{ flex: a.value / total, background: a.color, minWidth: 4, borderRadius: 2, transition: 'flex 0.3s' }} title={`${a.label}: ${a.value.toFixed(2)} SOL (${(a.value / total * 100).toFixed(1)}%)`} />
+                    ))}
+                  </div>
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                    {all.filter(a => a.value > 0).map(a => (
+                      <div key={a.label} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10 }}>
+                        <div style={{ width: 8, height: 8, borderRadius: '50%', background: a.color }} />
+                        <span style={{ fontWeight: 600, color: 'var(--t1)' }}>{a.label}</span>
+                        <span className="mono" style={{ color: 'var(--t3)' }}>{(a.value / total * 100).toFixed(0)}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* Main grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: mode === 'pro' ? '1fr 380px' : '1fr', gap: 14 }} className="an an2">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {/* Open Positions */}
+          <div className="card">
+            <div className="card-head">
+              <span className="card-title">Open Positions</span>
+              <span className="mono" style={{ fontSize: 11, color: 'var(--t3)' }}>{effectivePositions.length}</span>
+            </div>
+            {effectivePositions.length === 0 ? (
+              <div style={{ padding: '48px 24px', textAlign: 'center' }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--t1)', marginBottom: 6 }}>No Open Trades</div>
+                <div style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 18 }}>Go to the Terminal to make your first paper trade.</div>
+                <Link href="/terminal" className="btn primary haptic">Start Trading</Link>
+              </div>
+            ) : (
+              <div>
+                {effectivePositions.map((p: any, i: number) => (
+                  <div key={p.id || i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 18px', borderBottom: '1px solid var(--border-0)' }}>
+                    {p.token_image ? (
+                      <img src={p.token_image} alt={p.token_symbol} style={{ width: 32, height: 32, borderRadius: 8 }} />
+                    ) : (
+                      <div style={{ width: 32, height: 32, borderRadius: 8, background: 'var(--bg-3)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700, color: 'var(--t2)' }}>
+                        {(p.token_symbol || p.symbol || 'TK').slice(0, 2)}
+                      </div>
+                    )}
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--t0)' }}>{p.token_symbol || p.symbol || 'Token'}</div>
+                      <div className="mono" style={{ fontSize: 11, color: 'var(--t3)' }}>{parseFloat(p.amount_sol ?? p.amount ?? 0).toFixed(4)} SOL</div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div className={`mono ${(p.pnl_percent ?? p.pnl ?? 0) >= 0 ? 'up' : 'down'}`} style={{ fontSize: 13, fontWeight: 700 }}>
+                        {(p.pnl_percent ?? 0) >= 0 ? '+' : ''}{(p.pnl_percent ?? 0).toFixed(1)}%
+                      </div>
+                      <div className="mono" style={{ fontSize: 10, color: 'var(--t3)' }}>
+                        {(p.pnl_sol ?? p.pnl ?? 0) >= 0 ? '+' : ''}{parseFloat(String(p.pnl_sol ?? p.pnl ?? 0)).toFixed(4)} SOL
+                      </div>
+                    </div>
+                    <Link href={`/terminal?ca=${p.token_address}`} className="btn haptic" style={{ padding: '5px 12px', fontSize: 10 }}>View</Link>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Trending Tokens (REAL DATA from API) */}
+          <div className="card">
+            <div className="card-head">
+              <span className="card-title">Trending Tokens</span>
+              <Link href="/discover" style={{ fontSize: 11, fontWeight: 600, color: 'var(--green)' }}>View All</Link>
+            </div>
+            {trendingTokens.length === 0 && !trendingError ? (
+              <div style={{ padding: 12 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 8 }}>
+                  {[1,2,3,4,5,6].map(i => (
+                    <div key={i} style={{ padding: 14, background: 'var(--bg-2)', borderRadius: 12, border: '1px solid var(--border-0)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                        <div className="skeleton" style={{ width: 22, height: 22, borderRadius: '50%' }} />
+                        <div className="skeleton" style={{ width: 50, height: 14, borderRadius: 2 }} />
+                      </div>
+                      <div className="skeleton" style={{ width: 60, height: 16, borderRadius: 2, marginBottom: 4 }} />
+                      <div className="skeleton" style={{ width: 30, height: 10, borderRadius: 2, marginBottom: 6 }} />
+                      <div className="skeleton" style={{ width: 40, height: 12, borderRadius: 2 }} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : trendingError ? (
+              <div style={{ padding: '40px 0', textAlign: 'center' }}>
+
+                <div style={{ fontSize: 13, color: 'var(--t2)', fontWeight: 600, marginBottom: 4 }}>Couldn't load trending tokens</div>
+                <div style={{ fontSize: 11, color: 'var(--t3)', marginBottom: 12 }}>API may be starting up — this takes ~30s on first load</div>
+                <button className="btn haptic" onClick={() => { setTrendingError(false); apiRequest('GET', '/tokens/trending').then(r => { if (r.success && r.data?.tokens) { setTrendingTokens(r.data.tokens.slice(0, 8)); setTrendingError(false); } else setTrendingError(true); }).catch(() => setTrendingError(true)); }} style={{ padding: '6px 14px', fontSize: 10 }}>Retry</button>
+              </div>
+            ) : mode === 'beginner' ? (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 8, padding: 12 }}>
+                {trendingTokens.slice(0, 6).map(tk => (
+                  <Link key={tk.address} href={`/terminal?ca=${tk.address}`} className="haptic"
+                    style={{ padding: 14, background: 'var(--bg-2)', border: '1px solid var(--border-0)', borderRadius: 12, transition: 'all 0.2s', cursor: 'pointer' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                      {tk.image ? (
+                        <img src={tk.image} alt={tk.symbol} style={{ width: 22, height: 22, borderRadius: '50%' }} />
+                      ) : (
+                        <div style={{ width: 22, height: 22, borderRadius: '50%', background: 'var(--bg-3)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 8, fontWeight: 700, color: 'var(--t2)' }}>{tk.symbol.slice(0, 2)}</div>
+                      )}
+                      <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--t0)' }}>{tk.symbol}</div>
+                    </div>
+                    <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: 'var(--t0)', marginBottom: 2 }}>{fmtMcap(tk.marketCap)}</div>
+                    <div style={{ fontSize: 10, color: 'var(--t3)', marginBottom: 4 }}>MCap</div>
+                    <div className={`mono ${tk.priceChange24h >= 0 ? 'up' : 'down'}`} style={{ fontSize: 11, fontWeight: 600 }}>{tk.priceChange24h >= 0 ? '+' : ''}{tk.priceChange24h.toFixed(1)}%</div>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <table className="tbl">
+                <thead><tr><th>Token</th><th>MCap</th><th>24h</th><th>Volume</th><th></th></tr></thead>
+                <tbody>
+                  {trendingTokens.map(tk => (
+                    <tr key={tk.address} onClick={() => window.location.href = `/terminal?ca=${tk.address}`} style={{ cursor: 'pointer' }}>
+                      <td>
+                        <div className="tk">
+                          {tk.image ? (
+                            <img src={tk.image} alt={tk.symbol} style={{ width: 26, height: 26, borderRadius: '50%' }} />
+                          ) : (
+                            <div className="tk-img">{tk.symbol.slice(0, 2)}</div>
+                          )}
+                          <div><div className="tk-name">{tk.symbol}</div><div className="tk-addr">{tk.name}</div></div>
+                        </div>
+                      </td>
+                      <td className="mono" style={{ fontWeight: 600, color: 'var(--t0)' }}>{fmtMcap(tk.marketCap)}</td>
+                      <td className={`mono ${tk.priceChange24h >= 0 ? 'up' : 'down'}`} style={{ fontWeight: 600 }}>{tk.priceChange24h >= 0 ? '+' : ''}{tk.priceChange24h.toFixed(1)}%</td>
+                      <td className="mono" style={{ color: 'var(--t2)' }}>{fmtVol(tk.volume24h)}</td>
+                      <td><Link href={`/terminal?ca=${tk.address}`} className="btn haptic" style={{ padding: '4px 10px', fontSize: 10, color: 'var(--green)', background: 'var(--green-bg)', border: '1px solid rgba(0,255,136,0.08)' }}>Trade</Link></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+
+        {/* Right column — Pro sidebar */}
+        {mode === 'pro' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {/* Academy Progress */}
+            <div className="card">
+              <div className="card-head">
+                <span className="card-title">Academy Progress</span>
+                <Link href="/learn" style={{ fontSize: 11, fontWeight: 600, color: 'var(--cyan)' }}>{academyPct}%</Link>
+              </div>
+              <div className="card-pad">
+                <div className="stat-bar" style={{ marginBottom: 10 }}>
+                  <div className="stat-bar-fill" style={{ width: `${academyPct}%`, background: 'linear-gradient(90deg, var(--green), var(--cyan))' }} />
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--t2)', marginBottom: 8 }}>
+                  {completedLessons.size}/{allLessons.length} lessons complete
+                </div>
+                {nextLesson && (
+                  <Link href="/learn" className="haptic" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', background: 'var(--bg-2)', borderRadius: 8, border: '1px solid var(--border-0)' }}>
+                    <div style={{ width: 30, height: 30, borderRadius: 8, background: 'rgba(0,200,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: 'var(--cyan)' }}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></div>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--t0)' }}>Next: {nextLesson.title}</div>
+                      <div style={{ fontSize: 10, color: 'var(--t3)' }}>+{nextLesson.reward} SOL reward</div>
+                    </div>
+                  </Link>
+                )}
+              </div>
+            </div>
+
+            {/* Quick Actions */}
+            <div className="card">
+              <div className="card-head"><span className="card-title">Quick Actions</span></div>
+              <div style={{ padding: 6 }}>
+                {[
+                  { href: '/terminal', label: 'Open Terminal', desc: 'Trade any Solana token', color: 'var(--green)' },
+                  { href: '/discover', label: 'Discover Tokens', desc: 'Browse trending memecoins', color: 'var(--accent-l)' },
+                  { href: '/leaderboard', label: 'Leaderboard', desc: 'Check your ranking', color: 'var(--gold)' },
+                  { href: '/learn', label: 'Academy', desc: 'Learn trading strategies', color: 'var(--cyan)' },
+                ].map(a => (
+                  <Link key={a.href} href={a.href} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 12px', borderRadius: 10, transition: 'all 0.15s', cursor: 'pointer' }}
+                    className="haptic">
+                    <div style={{ width: 34, height: 34, borderRadius: 10, background: `color-mix(in srgb, ${a.color} 8%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, color: a.color }}>
+                      {a.label[0]}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--t0)' }}>{a.label}</div>
+                      <div style={{ fontSize: 11, color: 'var(--t3)' }}>{a.desc}</div>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            </div>
+
+            {/* Trader Tier */}
+            <div className="card" style={{ borderColor: 'rgba(251,191,36,0.08)', background: 'linear-gradient(135deg, rgba(11,13,18,0.95), rgba(30,25,10,0.15))' }}>
+              <div className="card-pad">
+                <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--gold)', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 8 }}>Trader Tier</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: 'var(--t0)', marginBottom: 4 }}>
+                  {displayBalance >= 1000 ? 'HIMOTHY' : displayBalance >= 500 ? 'Diamond Hands' : displayBalance >= 200 ? 'Paper Veteran' : 'Fresh Ape'}
+                </div>
+                <div className="mono" style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 12 }}>
+                  {displayBalance.toFixed(2)} / {displayBalance >= 1000 ? '---' : displayBalance >= 500 ? '1000' : displayBalance >= 200 ? '500' : '200'} SOL
+                </div>
+                <div className="stat-bar"><div className="stat-bar-fill" style={{ width: `${Math.min(100, (displayBalance / (displayBalance >= 1000 ? displayBalance : displayBalance >= 500 ? 1000 : displayBalance >= 200 ? 500 : 200)) * 100)}%`, background: 'var(--gold)' }} /></div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Beginner-only CTA */}
+      {mode === 'beginner' && (
+        <div className="an an3" style={{ marginTop: 20, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <Link href="/terminal" className="haptic" style={{
+            padding: '22px 24px', borderRadius: 16, background: 'linear-gradient(135deg, rgba(0,255,136,0.08), rgba(0,255,136,0.02))',
+            border: '1px solid rgba(0,255,136,0.1)', transition: 'all 0.2s', cursor: 'pointer'
+          }}>
+            <div style={{ fontSize: 16, fontWeight: 800, color: 'var(--green)', marginBottom: 4 }}>Start Trading</div>
+            <div style={{ fontSize: 12, color: 'var(--t2)' }}>Search any Solana token and make a paper trade</div>
+          </Link>
+          <Link href="/learn" className="haptic" style={{
+            padding: '22px 24px', borderRadius: 16, background: 'linear-gradient(135deg, rgba(0,200,255,0.06), rgba(0,200,255,0.02))',
+            border: '1px solid rgba(0,200,255,0.08)', transition: 'all 0.2s', cursor: 'pointer'
+          }}>
+            <div style={{ fontSize: 16, fontWeight: 800, color: 'var(--cyan)', marginBottom: 4 }}>Academy</div>
+            <div style={{ fontSize: 12, color: 'var(--t2)' }}>{completedLessons.size}/{allLessons.length} lessons · earn SOL rewards</div>
+          </Link>
+        </div>
+      )}
+    </AppShell>
+  );
+}

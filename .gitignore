@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.next/
+.turbo/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+.firebase-service-account.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Debug
+firebase-debug.log
+.vercel
+.env*.local
+
+# Reference extension bundles (reverse engineering artifacts)
+/extension/
+
+# Packaged extension artifacts
+apps/extension/*.zip

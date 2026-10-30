@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, lint, test
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: 1
+      # Non-secret placeholders so the Next.js static export can initialise the Firebase SDK.
+      NEXT_PUBLIC_FIREBASE_API_KEY: ci-placeholder
+      NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ci-placeholder.firebaseapp.com
+      NEXT_PUBLIC_FIREBASE_PROJECT_ID: ci-placeholder
+      NEXT_PUBLIC_FIREBASE_APP_ID: ci-placeholder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Build, lint and test (shared, API, web, extension)
+        run: npx turbo run build lint test

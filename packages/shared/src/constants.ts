@@ -1,0 +1,63 @@
+import type { PlatformConfig } from './types.js';
+
+// ─── Trading Constants ──────────────────────────────────
+export const DEFAULT_PAPER_BALANCE = 100; // SOL
+export const BASE_PRIORITY_FEE = 0.005;   // SOL (simulated Solana priority fee)
+export const PLATFORM_FEE = 0.001;        // SOL (Papertrade platform fee sim)
+export const SOL_DECIMALS = 9;
+export const LAMPORTS_PER_SOL = 1_000_000_000;
+export const MAX_SUPPLY_PERCENT = 4;      // Max % of token supply a user can hold
+
+
+
+// ─── Quick Buy Amounts (SOL) ────────────────────────────
+export const QUICK_BUY_AMOUNTS = [0.5, 1, 2, 5, 10] as const;
+
+// ─── Quick Sell Percentages ─────────────────────────────
+export const QUICK_SELL_PERCENTAGES = [25, 50, 100] as const;
+
+// ─── Rug Detection ──────────────────────────────────────
+export const RUG_LIQUIDITY_THRESHOLD_USD = 100;   // below this = rug
+export const RUG_CHECK_INTERVAL_MS = 10_000;      // poll every 10s
+
+// ─── Platform Configs ───────────────────────────────────
+export const PLATFORM_CONFIGS: PlatformConfig[] = [
+  {
+    id: 'bullx',
+    name: 'BullX',
+    urlPattern: /bullx\.(io|com)/,
+    tokenAddressExtractor: 'url_query_address',
+  },
+  {
+    id: 'padre',
+    name: 'Padre',
+    urlPattern: /padre\.(market|gg)|trade\.padre/,
+    tokenAddressExtractor: 'url_path_segment',
+  },
+  {
+    id: 'photon',
+    name: 'Photon',
+    urlPattern: /photon-sol\.tinyastro\.io|photon\.tinyastro\.io/,
+    tokenAddressExtractor: 'url_path_segment',
+  },
+  {
+    id: 'axiom',
+    name: 'Axiom',
+    urlPattern: /axiom\.trade/,
+    tokenAddressExtractor: 'url_path_segment',
+  },
+  {
+    id: 'gmgn',
+    name: 'GMGN',
+    urlPattern: /gmgn\.ai/,
+    tokenAddressExtractor: 'url_path_segment',
+  },
+];
+
+// ─── API ────────────────────────────────────────────────
+export const API_BASE_URL = process.env.PAPERTRADE_API_URL ?? 'http://localhost:3001';
+export const WS_URL = process.env.PAPERTRADE_WS_URL ?? 'ws://localhost:3001/ws';
+
+// ─── Leaderboard ────────────────────────────────────────
+export const LEADERBOARD_PAGE_SIZE = 100;
+export const LEADERBOARD_REFRESH_INTERVAL_MS = 30_000;

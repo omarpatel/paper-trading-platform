@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "Papertrade",
+    "slug": "papertrade",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "scheme": "papertrade",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#d4c8a8"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "io.github.omarpatel.papertrade",
+      "buildNumber": "1"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#d4c8a8"
+      },
+      "package": "io.github.omarpatel.papertrade",
+      "versionCode": 1
+    },
+    "plugins": [
+      "expo-splash-screen"
+    ]
+  }
+}
